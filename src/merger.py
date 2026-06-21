@@ -6,6 +6,9 @@ from .vcards import Contact, PhoneEntry, EmailEntry
 from .normalize import normalize_phone, normalize_name
 from .matcher import DuplicateCluster
 
+def preview_name(cluster: DuplicateCluster) -> str:
+    return _best_name(cluster.contacts)
+
 
 def merge_cluster(cluster: DuplicateCluster, chosen_name: str | None = None) -> Contact:
     contacts = cluster.contacts

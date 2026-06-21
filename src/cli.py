@@ -14,7 +14,7 @@ from rich.columns import Columns
 
 from .vcards import load_all, Contact
 from .matcher import find_duplicates, DuplicateCluster
-from .merger import merge_cluster
+from .merger import merge_cluster, preview_name
 from .exporter import export_vcf
 
 console = Console()
@@ -87,6 +87,9 @@ def _show_cluster(cluster: DuplicateCluster, index: int, total: int):
         console.print("  [dim]Match signals:[/dim]")
         for sig in cluster.signals:
             console.print(f"    - {sig.kind}: {sig.detail}")
+    console.print()
+    proposed = preview_name(cluster)
+    console.print(f"  [bold green]→ If merged, the name will be: [white]{proposed}[/white][/bold green]")
     console.print()
 
 
@@ -165,7 +168,7 @@ def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dr
 
         if auto and cluster.confidence >= threshold:
             action = "merge"
-            console.print(f"  [green]Auto-merging (confidence {cluster.confidence:.0%} >= {threshold:.0%})[/green]")
+            console.print(f"  [green]✓ Auto-merging (confidence {cluster.confidence:.0%} ≥ {threshold:.0%})[/green]")
         else:
             action = _prompt_action(cluster, threshold if auto else 1.0)
 
