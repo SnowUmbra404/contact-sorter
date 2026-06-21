@@ -1,0 +1,56 @@
+BEGIN:VCARD
+VERSION:3.0
+FN:Manpreet Singh
+N:Singh;Manpreet;;;
+TEL;TYPE=CELL:+919876543213
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+EMAIL;TYPE=HOME:suresh.kumar@outlook.com
+FN:Suresh Kumar
+N:Kumar;Suresh;;;
+TEL;TYPE=CELL:+919876543214
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+EMAIL;TYPE=HOME:rajesh.sharma@gmail.com
+EMAIL;TYPE=WORK:rsharma@infosys.com
+FN:Rajesh Kumar Sharma
+N:Sharma;Rajesh;;;
+ORG:Infosys
+TEL;TYPE=CELL:+919876543210
+TITLE:Manager
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+EMAIL;TYPE=HOME:priya.gupta@yahoo.com
+EMAIL;TYPE=HOME:priya.gupta@gmail.com
+FN:Priya Devi Gupta
+N:Gupta;Priya;;;
+TEL;TYPE=CELL:+919876543211
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+EMAIL;TYPE=HOME:amit.verma@hotmail.com
+FN:Amit Ji Verma
+N:Verma;Amit;;;
+ORG:TCS
+TEL;TYPE=CELL:+919876543212
+TITLE:Software Engineer
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+FN:Rameshbhai Patel
+N:Patel;Rameshbhai;;;
+TEL;TYPE=CELL:+919876543220
+END:VCARD
+BEGIN:VCARD
+VERSION:3.0
+EMAIL;TYPE=HOME:neha.joshi@gmail.com
+EMAIL;TYPE=WORK:neha.joshi@company.com
+FN:Neha Kumari Joshi
+N:Joshi;Neha;;;
+ORG:Wipro
+TEL;TYPE=CELL:+919876543230
+TITLE:Lead
+END:VCARD

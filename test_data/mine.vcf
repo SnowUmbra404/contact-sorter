@@ -1,0 +1,38 @@
+BEGIN:VCARD
+VERSION:2.1
+N:Sharma;Rajesh
+FN:Rajesh Sharma
+TEL;TYPE=CELL:+919876543210
+EMAIL;TYPE=HOME:rajesh.sharma@gmail.com
+ORG:Infosys
+TITLE:Manager
+END:VCARD
+BEGIN:VCARD
+VERSION:2.1
+N:Gupta;Priya
+FN:Priya Gupta
+TEL;TYPE=CELL:+919876543211
+EMAIL;TYPE=HOME:priya.gupta@yahoo.com
+END:VCARD
+BEGIN:VCARD
+VERSION:2.1
+N:Verma;Amit
+FN:Amit Verma
+TEL;TYPE=CELL:+919876543212
+EMAIL;TYPE=HOME:amit.verma@hotmail.com
+ORG:TCS
+TITLE:Developer
+END:VCARD
+BEGIN:VCARD
+VERSION:2.1
+N:Singh;Manpreet
+FN:Manpreet Singh
+TEL;TYPE=CELL:+919876543213
+END:VCARD
+BEGIN:VCARD
+VERSION:2.1
+N:Kumar;Suresh
+FN:Suresh Kumar
+TEL;TYPE=CELL:+919876543214
+EMAIL;TYPE=HOME:suresh.kumar@outlook.com
+END:VCARD
