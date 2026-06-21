@@ -8,6 +8,7 @@ dependencies = [
     "rapidfuzz>=3.6.0",
     "rich>=13.0.0",
     "click>=8.1.0",
+    "textual>=8.2.7",
 ]
 
 [project.scripts]
