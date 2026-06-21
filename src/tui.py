@@ -386,87 +386,171 @@ class RenameScreen(Screen):
 class CleanScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back"),
+        Binding("space", "toggle_select", "Select", show=True),
+        Binding("a", "select_all", "Select All", show=True),
+        Binding("d", "deselect_all", "Deselect All", show=True),
     ]
 
     def __init__(self, contacts: list[Contact]):
         super().__init__()
         self.contacts = contacts
+        self.matches: list[Contact] = []
+        self.selected: set[int] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="clean"):
-            yield Static("[bold]Clean & Rename Contacts[/bold]  [dim]— find text, replace across all matches[/dim]\n")
+            yield Static("[bold]Find & Replace in Names[/bold]  [dim]— search → select → replace → choose position → apply[/dim]\n")
 
-            yield Static("[bold]Find:[/bold]")
-            yield Input(placeholder="text to find in names... (e.g. Mr.  or  RAJESH  or  (Home))", id="find")
+            with Horizontal(id="search-row"):
+                yield Input(placeholder="Find text in names... (e.g. cuh  or  Mr.  or  (Home))", id="find", classes="search-input")
+                yield Button("🔍 Search", variant="primary", id="search-btn")
 
-            yield Static("[bold]Replace with:[/bold]  [dim](leave empty to remove)[/dim]")
-            yield Input(placeholder="replacement...", id="replace", value="")
+            yield Static("", id="match-count")
+            yield DataTable(id="matches-table", cursor_type="row", zebra_stripes=True)
 
             yield Static("")
-            with Horizontal():
+            with Horizontal(id="replace-row"):
+                yield Label("[bold]Replace with:[/bold]")
+                yield Input(placeholder="replacement text...", id="replace", classes="replace-input")
+                yield Label("[bold]Position:[/bold]")
+                yield Select(
+                    [(["Everywhere", "everywhere"]), (["At Start", "start"]), (["At End", "end"]), (["First Occurrence", "first"])],
+                    value="everywhere",
+                    id="position",
+                    classes="position-select",
+                )
                 yield Checkbox("Case-sensitive", id="case-sen")
-                yield Checkbox("Regex", id="regex")
-                yield Checkbox("Title-case result", id="titlecase")
 
-            yield Static("")
             with Horizontal(id="action-btns"):
-                yield Button("🔍 Preview", variant="primary", id="preview")
-                yield Button("✓ Apply to All", variant="success", id="apply")
-                yield Button("⚡ Strip Mr./Mrs./Ji", variant="warning", id="strip")
-                yield Button("⚡ Title-Case All", variant="warning", id="title")
-                yield Button("⚡ Remove (brackets)", variant="warning", id="brackets")
+                yield Button("👁 Preview", variant="primary", id="preview")
+                yield Button("✓ Apply to Selected", variant="success", id="apply")
+                yield Button("Select All (a)", id="select-all-btn")
+                yield Button("Deselect All (d)", id="deselect-btn")
                 yield Button("← Back (esc)", id="back")
+
+            with Horizontal(id="quick-btns"):
+                yield Button("⚡ Strip Mr./Mrs./Ji", variant="warning", id="strip")
+                yield Button("⚡ Title-Case All", variant="warning", id="titlecase")
+                yield Button("⚡ Remove (brackets)", variant="warning", id="brackets")
 
             yield Static("", id="result-count")
             yield RichLog(id="log", highlight=True, markup=True)
         yield Footer()
 
-    def _find_matches(self) -> list[tuple[Contact, str, str]]:
-        find_text = self.query_one("#find").value
-        replace_text = self.query_one("#replace").value
-        case_sensitive = self.query_one("#case-sen").value
-        use_regex = self.query_one("#regex").value
-        do_title = self.query_one("#titlecase").value
+    def on_mount(self) -> None:
+        table = self.query_one("#matches-table")
+        table.add_columns("✓", "Name", "Phones", "Emails", "From")
+        self.query_one("#find").focus()
 
+    def _do_search(self) -> None:
+        find_text = self.query_one("#find").value.strip()
+        case_sensitive = self.query_one("#case-sen").value
+        if not find_text:
+            self.matches = []
+            self.selected.clear()
+            self._fill_table()
+            return
+        self.matches = []
+        for c in self.contacts:
+            name = c.full_name or ""
+            if case_sensitive:
+                found = find_text in name
+            else:
+                found = find_text.lower() in name.lower()
+            if found:
+                self.matches.append(c)
+        self.selected = set(range(len(self.matches)))
+        self._fill_table()
+
+    def _fill_table(self) -> None:
+        table = self.query_one("#matches-table")
+        table.clear()
+        for i, c in enumerate(self.matches):
+            mark = "[green]✓[/green]" if i in self.selected else "[dim]✗[/dim]"
+            phones = ", ".join(p.number for p in c.phones) or "-"
+            emails = ", ".join(e.address for e in c.emails) or "-"
+            table.add_row(mark, c.full_name or "(no name)", phones, emails, c.source_file)
+        self.query_one("#match-count").update(
+            f"[bold]{len(self.selected)} of {len(self.matches)} selected[/bold]  "
+            f"[dim](out of {len(self.contacts)} total contacts)[/dim]"
+        )
+
+    def _compute_change(self, name: str, find_text: str, replace_text: str, position: str, case_sensitive: bool) -> str:
+        if not find_text:
+            return name
+        if case_sensitive:
+            search_in = name
+            search_for = find_text
+        else:
+            search_in = name.lower()
+            search_for = find_text.lower()
+
+        if search_for not in search_in:
+            return name
+
+        if position == "start":
+            if case_sensitive:
+                if name.startswith(find_text):
+                    return replace_text + name[len(find_text):]
+            else:
+                if name.lower().startswith(find_text.lower()):
+                    return replace_text + name[len(find_text):]
+            return name
+        elif position == "end":
+            if case_sensitive:
+                if name.endswith(find_text):
+                    return name[:-len(find_text)] + replace_text
+            else:
+                if name.lower().endswith(find_text.lower()):
+                    return name[:-len(find_text)] + replace_text
+            return name
+        elif position == "first":
+            if case_sensitive:
+                return name.replace(find_text, replace_text, 1)
+            else:
+                pattern = re.compile(re.escape(find_text), re.IGNORECASE)
+                return pattern.sub(replace_text, name, count=1)
+        else:
+            if case_sensitive:
+                return name.replace(find_text, replace_text)
+            else:
+                pattern = re.compile(re.escape(find_text), re.IGNORECASE)
+                return pattern.sub(replace_text, name)
+
+    def _get_changes(self) -> list[tuple[Contact, str, str]]:
+        find_text = self.query_one("#find").value.strip()
+        replace_text = self.query_one("#replace").value
+        position = self.query_one("#position").value
+        case_sensitive = self.query_one("#case-sen").value
         if not find_text:
             return []
-
         changes = []
-        for c in self.contacts:
-            name = c.full_name
-            if not name:
+        for i in self.selected:
+            if i >= len(self.matches):
                 continue
-            if use_regex:
-                flags = 0 if case_sensitive else re.IGNORECASE
-                new_name = re.sub(find_text, replace_text, name, flags=flags)
-            else:
-                if case_sensitive:
-                    new_name = name.replace(find_text, replace_text)
-                else:
-                    pattern = re.compile(re.escape(find_text), re.IGNORECASE)
-                    new_name = pattern.sub(replace_text, name)
-            new_name = re.sub(r"\s+", " ", new_name).strip()
-            if do_title:
-                new_name = title_case_name(new_name)
-            if new_name != name:
-                changes.append((c, name, new_name))
+            c = self.matches[i]
+            old = c.full_name or ""
+            new = self._compute_change(old, find_text, replace_text, position, case_sensitive)
+            new = re.sub(r"\s+", " ", new).strip()
+            if new != old:
+                changes.append((c, old, new))
         return changes
 
     def _show_preview(self) -> None:
-        changes = self._find_matches()
+        changes = self._get_changes()
         log = self.query_one("#log")
         log.clear()
         self.query_one("#result-count").update(f"[bold]{len(changes)} contacts would change[/bold]")
         if not changes:
-            log.write("[dim]No matches found. Try different text.[/dim]")
+            log.write("[dim]No changes. Select contacts and enter find/replace text.[/dim]")
             return
         for c, old, new in changes:
             phones = ", ".join(p.number for p in c.phones) or ""
             log.write(f"  [red]{old}[/red]  →  [green]{new}[/green]  [dim]{phones}[/dim]")
 
-    def _apply(self) -> None:
-        changes = self._find_matches()
+    def _apply_changes(self) -> None:
+        changes = self._get_changes()
         log = self.query_one("#log")
         if not changes:
             log.write("[dim]Nothing to change.[/dim]")
@@ -476,8 +560,49 @@ class CleanScreen(Screen):
         count = len(changes)
         log.write(f"\n[green]✓ Updated {count} contacts[/green]")
         self.query_one("#result-count").update(f"[green]{count} names updated[/green]")
-        self.query_one("#find").value = ""
-        self.query_one("#replace").value = ""
+        self._do_search()
+
+    def action_toggle_select(self) -> None:
+        table = self.query_one("#matches-table")
+        row = table.cursor_row
+        if row in self.selected:
+            self.selected.discard(row)
+        else:
+            self.selected.add(row)
+        self._fill_table()
+        if row < len(self.matches):
+            table.move_cursor(row=min(row + 1, len(self.matches) - 1))
+
+    def action_select_all(self) -> None:
+        self.selected = set(range(len(self.matches)))
+        self._fill_table()
+
+    def action_deselect_all(self) -> None:
+        self.selected.clear()
+        self._fill_table()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        row = event.cursor_row
+        if row in self.selected:
+            self.selected.discard(row)
+        else:
+            self.selected.add(row)
+        self._fill_table()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "search-btn": self._do_search,
+            "preview": self._show_preview,
+            "apply": self._apply_changes,
+            "select-all-btn": self.action_select_all,
+            "deselect-btn": self.action_deselect_all,
+            "strip": self._strip_honorifics,
+            "titlecase": self._titlecase_all,
+            "brackets": self._remove_brackets,
+            "back": self.app.pop_screen,
+        }
+        if event.button.id in actions:
+            actions[event.button.id]()
 
     def _strip_honorifics(self) -> None:
         log = self.query_one("#log")
@@ -495,6 +620,7 @@ class CleanScreen(Screen):
                 count += 1
         log.write(f"\n[green]✓ Stripped honorifics from {count} contacts[/green]")
         self.query_one("#result-count").update(f"[green]{count} cleaned[/green]")
+        self._do_search()
 
     def _titlecase_all(self) -> None:
         log = self.query_one("#log")
@@ -512,6 +638,7 @@ class CleanScreen(Screen):
                 count += 1
         log.write(f"\n[green]✓ Title-cased {count} contacts[/green]")
         self.query_one("#result-count").update(f"[green]{count} updated[/green]")
+        self._do_search()
 
     def _remove_brackets(self) -> None:
         log = self.query_one("#log")
@@ -531,21 +658,15 @@ class CleanScreen(Screen):
                 count += 1
         log.write(f"\n[green]✓ Removed brackets from {count} contacts[/green]")
         self.query_one("#result-count").update(f"[green]{count} updated[/green]")
+        self._do_search()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        actions = {
-            "preview": self._show_preview,
-            "apply": self._apply,
-            "strip": self._strip_honorifics,
-            "title": self._titlecase_all,
-            "brackets": self._remove_brackets,
-            "back": self.app.pop_screen,
-        }
-        if event.button.id in actions:
-            actions[event.button.id]()
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "find":
+            self._do_search()
 
     def action_back(self) -> None:
         self.app.pop_screen()
+
 
 
 class ExportScreen(Screen):
@@ -632,8 +753,14 @@ class ContactSorterApp(App):
     #view Input { margin: 0 0 1 0; }
     #table { height: 1fr; }
     #merge { padding: 0 2; }
-    #clean { padding: 0 2; }
-    #clean Input { margin: 0 0 0 0; }
+    #clean { padding: 0 1; }
+    #search-row { height: auto; margin: 0 0 1 0; }
+    .search-input { width: 3fr; }
+    #replace-row { height: auto; margin: 1 0; }
+    .replace-input { width: 2fr; }
+    .position-select { width: 16; }
+    #matches-table { height: 1fr; min-height: 6; }
+    #clean #log { height: 8; border: solid $accent; margin: 1 0; }
     #rename { padding: 1 2; }
     #export { padding: 1 2; }
     #detail-area { padding: 1 2; }
@@ -641,6 +768,7 @@ class ContactSorterApp(App):
     #log { height: 10; border: solid $accent; margin: 1 0; }
     #btns Button { margin: 0 1; }
     #action-btns Button { margin: 0 1; }
+    #quick-btns Button { margin: 0 1; }
     #result-count { padding: 0 0 0 0; }
     """
 
