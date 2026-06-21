@@ -1,7 +1,8 @@
-"""Interactive TUI for contact sorting."""
+"""Interactive TUI for contact sorting — rebuilt for real use."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -9,105 +10,138 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import (
     Header, Footer, Static, DataTable, Button,
-    OptionList, Label, Input, RichLog, Checkbox,
+    Input, RichLog, Checkbox, Select, Label,
 )
-from textual.widgets._option_list import Option
-from textual.containers import Horizontal, Vertical, Container
+from textual.containers import Horizontal, Vertical
 
 from .vcards import load_all, Contact
 from .matcher import find_duplicates, DuplicateCluster
 from .merger import merge_cluster, preview_name
 from .exporter import export_vcf
-from .normalize import title_case_name, clean_name, normalize_name_case
-
-
-class LoadScreen(Screen):
-    BINDINGS = [Binding("q", "quit", "Quit")]
-
-    def __init__(self, file_paths: list[str]):
-        super().__init__()
-        self.file_paths = file_paths
-        self.contacts: list[Contact] = []
-
-    def compose(self) -> ComposeResult:
-        yield Header()
-        yield Vertical(
-            Static("[bold cyan]Contact Sorter[/bold cyan]\n", id="title"),
-            Static(f"Files: {', '.join(self.file_paths)}", id="file-info"),
-            Button("Load & Continue", variant="primary", id="load-btn"),
-            Button("Quit", variant="error", id="quit-btn"),
-            id="load-area",
-        )
-        yield Footer()
-
-    def on_mount(self) -> None:
-        self.query_one("#load-btn").focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "load-btn":
-            self.contacts = load_all(self.file_paths)
-            self.app.push_screen(MainMenu(self.contacts, self.file_paths))
-        elif event.button.id == "quit-btn":
-            self.app.exit()
+from .normalize import (
+    title_case_name, clean_name, normalize_name_case,
+    normalize_phone, _PREFIXES, _SUFFIXES,
+)
 
 
 class MainMenu(Screen):
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("1", "merge", "Merge"),
-        Binding("2", "clean", "Clean Names"),
-        Binding("3", "export", "Export"),
-        Binding("4", "view", "View All"),
+        Binding("1", "action_view", "View"),
+        Binding("2", "action_merge", "Merge"),
+        Binding("3", "action_clean", "Clean"),
+        Binding("4", "action_export", "Export"),
+        Binding("q", "action_quit", "Quit"),
     ]
 
-    def __init__(self, contacts: list[Contact], file_paths: list[str]):
+    def __init__(self, contacts: list[Contact]):
         super().__init__()
         self.contacts = contacts
-        self.file_paths = file_paths
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="menu-area"):
-            yield Static(self._stats_text(), id="stats")
-            yield Static("[bold]Operations:[/bold]\n")
-            yield OptionList(
-                Option("Find & merge duplicate contacts", id="merge"),
-                Option("Clean names (fix case, strip honorifics)", id="clean"),
-                Option("View all contacts", id="view"),
-                Option("Export contacts to VCF", id="export"),
-                Option("Load more files", id="load-more"),
-                Option("Quit", id="quit"),
-                id="menu-list",
+        with Vertical(id="main"):
+            by_file: dict[str, int] = {}
+            for c in self.contacts:
+                by_file[c.source_file] = by_file.get(c.source_file, 0) + 1
+            stats_lines = []
+            for f, n in by_file.items():
+                stats_lines.append(f"  {f}: {n}")
+            stats_lines.append(f"  Total: {len(self.contacts)}")
+            yield Static(
+                "[bold]Contact Sorter[/bold]\n"
+                + "\n".join(stats_lines)
+                + "\n\n"
+                "[bold]Choose:[/bold]\n"
+                "  [cyan]1[/cyan] View & search contacts\n"
+                "  [cyan]2[/cyan] Find & merge duplicates\n"
+                "  [cyan]3[/cyan] Clean & rename names\n"
+                "  [cyan]4[/cyan] Export to VCF\n"
+                "  [cyan]q[/cyan] Quit",
+                id="menu",
             )
         yield Footer()
 
-    def _stats_text(self) -> str:
-        by_file: dict[str, int] = {}
-        for c in self.contacts:
-            by_file[c.source_file] = by_file.get(c.source_file, 0) + 1
-        lines = ["[bold cyan]Loaded Contacts[/bold cyan]"]
-        for f, count in by_file.items():
-            lines.append(f"  {f}: {count}")
-        lines.append(f"  [bold]Total: {len(self.contacts)}[/bold]")
-        return "\n".join(lines)
+    def on_mount(self) -> None:
+        self.query_one("#menu").focus()
+
+    def action_view(self) -> None:
+        self.app.push_screen(ViewScreen(self.contacts))
+
+    def action_merge(self) -> None:
+        self.app.push_screen(MergeScreen(self.contacts))
+
+    def action_clean(self) -> None:
+        self.app.push_screen(CleanScreen(self.contacts))
+
+    def action_export(self) -> None:
+        self.app.push_screen(ExportScreen(self.contacts))
+
+    def action_quit(self) -> None:
+        self.app.exit()
+
+
+class ViewScreen(Screen):
+    BINDINGS = [
+        Binding("escape", "back", "Back"),
+        Binding("f", "focus_search", "Search", show=True),
+        Binding("a", "select_all", "Select All", show=True),
+        Binding("n", "select_none", "Deselect", show=True),
+    ]
+
+    def __init__(self, contacts: list[Contact]):
+        super().__init__()
+        self.contacts = contacts
+        self.filtered: list[Contact] = contacts
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Vertical(id="view"):
+            yield Input(placeholder="Search contacts... (name, phone, email, org)", id="search", classes="search-bar")
+            yield Static("", id="count-label")
+            yield DataTable(id="table", cursor_type="row")
+            with Horizontal(id="actions"):
+                yield Button("Back (esc)", id="back")
+        yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#menu-list").focus()
+        table = self.query_one("#table")
+        table.add_columns("Name", "Phones", "Emails", "Org", "Source")
+        self._populate_table(self.contacts)
+        self.query_one("#search").focus()
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        option_id = event.option_id
-        if option_id == "merge":
-            self.app.push_screen(MergeScreen(self.contacts, self.file_paths))
-        elif option_id == "clean":
-            self.app.push_screen(CleanScreen(self.contacts, self.file_paths))
-        elif option_id == "view":
-            self.app.push_screen(ViewScreen(self.contacts, self.file_paths))
-        elif option_id == "export":
-            self.app.push_screen(ExportScreen(self.contacts, self.file_paths))
-        elif option_id == "load-more":
-            self.app.push_screen(FilePickerScreen(self.contacts, self.file_paths))
-        elif option_id == "quit":
-            self.app.exit()
+    def _populate_table(self, contacts: list[Contact]) -> None:
+        table = self.query_one("#table")
+        table.clear()
+        for c in contacts:
+            phones = ", ".join(p.number for p in c.phones) or "-"
+            emails = ", ".join(e.address for e in c.emails) or "-"
+            table.add_row(c.full_name or "(no name)", phones, emails, c.org or "-", c.source_file)
+        self.query_one("#count-label").update(f"Showing {len(contacts)} of {len(self.contacts)} contacts")
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        q = event.value.lower().strip()
+        if not q:
+            self.filtered = self.contacts
+        else:
+            self.filtered = [
+                c for c in self.contacts
+                if q in c.full_name.lower()
+                or q in c.org.lower()
+                or q in c.note.lower()
+                or any(q in p.number for p in c.phones)
+                or any(q in e.address.lower() for e in c.emails)
+            ]
+        self._populate_table(self.filtered)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "back":
+            self.app.pop_screen()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_focus_search(self) -> None:
+        self.query_one("#search").focus()
 
 
 class MergeScreen(Screen):
@@ -116,155 +150,111 @@ class MergeScreen(Screen):
         Binding("a", "approve", "Approve"),
         Binding("s", "skip", "Skip"),
         Binding("r", "rename", "Rename"),
-        Binding("k", "keep", "Keep Separate"),
-        Binding("n", "next_cluster", "Next"),
-        Binding("p", "prev_cluster", "Prev"),
-        Binding("q", "quit", "Quit"),
+        Binding("n", "next", "Next"),
+        Binding("p", "prev", "Prev"),
     ]
 
-    def __init__(self, contacts: list[Contact], file_paths: list[str]):
+    def __init__(self, contacts: list[Contact]):
         super().__init__()
         self.contacts = contacts
-        self.file_paths = file_paths
         self.clusters: list[DuplicateCluster] = []
-        self.merged_contacts: list[Contact] = []
-        self.kept_contacts: list[Contact] = []
-        self.current_idx = 0
-        self.results_log: list[dict] = []
+        self.idx = 0
+        self.merged: list[Contact] = []
+        self.skipped_clusters: list[int] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="merge-area"):
-            yield Static("Finding duplicates...", id="merge-status")
-            yield Static("", id="cluster-info")
-            yield Static("", id="cluster-entries")
-            yield Static("", id="proposed-name")
-            yield Static("", id="merge-log")
-            with Horizontal(id="merge-actions"):
+        with Vertical(id="merge"):
+            yield Static("", id="status")
+            yield Static("", id="cluster-view")
+            yield Static("", id="preview")
+            yield Static("", id="log")
+            with Horizontal(id="btns"):
                 yield Button("Approve (a)", variant="success", id="btn-approve")
                 yield Button("Skip (s)", variant="default", id="btn-skip")
                 yield Button("Rename (r)", variant="warning", id="btn-rename")
-                yield Button("Keep Separate (k)", variant="error", id="btn-keep")
-                yield Button("Next (n)", variant="default", id="btn-next")
-                yield Button("Back to Menu (esc)", variant="default", id="btn-back")
+                yield Button("Next (n)", id="btn-next")
+                yield Button("Prev (p)", id="btn-prev")
+                yield Button("Back (esc)", id="btn-back")
         yield Footer()
 
     def on_mount(self) -> None:
         self.clusters = find_duplicates(self.contacts)
         if not self.clusters:
-            self.query_one("#merge-status").update("[green]No duplicates found![/green]")
+            self.query_one("#status").update("[green]No duplicates found[/green]")
             return
-        self.query_one("#merge-status").update(
-            f"[bold]Found {len(self.clusters)} clusters — use keys or buttons[/bold]"
-        )
-        self._show_cluster()
+        self._show()
 
-    def _show_cluster(self) -> None:
-        if not self.clusters:
-            self.query_one("#cluster-info").update("[green]All clusters reviewed![/green]")
-            self.query_one("#cluster-entries").update("")
-            self.query_one("#proposed-name").update("")
+    def _show(self) -> None:
+        if self.idx >= len(self.clusters):
+            self.query_one("#status").update("[green]All done![/green]")
+            self.query_one("#cluster-view").update("")
+            self.query_one("#preview").update("")
+            self._summary()
             return
-
-        cluster = self.clusters[self.current_idx]
-        conf = cluster.confidence
-        conf_style = "green" if conf >= 0.95 else "yellow" if conf >= 0.80 else "red"
-        conf_label = "HIGH" if conf >= 0.95 else "MED" if conf >= 0.80 else "LOW"
-
-        self.query_one("#cluster-info").update(
-            f"[bold]Cluster {self.current_idx + 1}/{len(self.clusters)}[/bold]  "
-            f"[{conf_style}]confidence: {conf:.0%} ({conf_label})[/{conf_style}]"
+        c = self.clusters[self.idx]
+        conf = c.confidence
+        color = "green" if conf >= 0.95 else "yellow" if conf >= 0.80 else "red"
+        self.query_one("#status").update(
+            f"[bold]Cluster {self.idx+1}/{len(self.clusters)}[/bold]  "
+            f"[{color}]{conf:.0%} confidence[/{color}]"
         )
-
         lines = []
-        for i, c in enumerate(cluster.contacts):
-            lines.append(f"[bold cyan]Entry {i+1}:[/bold cyan] {c.full_name or '(no name)'}")
-            phones = ", ".join(f"{p.number} ({p.type})" for p in c.phones) or "none"
-            emails = ", ".join(e.address for e in c.emails) or "none"
-            lines.append(f"  Phones: {phones}")
-            lines.append(f"  Emails: {emails}")
-            if c.org:
-                lines.append(f"  Org: {c.org}")
-            lines.append(f"  Source: {c.source_file}")
-            lines.append("")
-        self.query_one("#cluster-entries").update("\n".join(lines))
+        for i, contact in enumerate(c.contacts):
+            phones = ", ".join(f"{p.number} ({p.type})" for p in contact.phones) or "none"
+            emails = ", ".join(e.address for e in contact.emails) or "none"
+            lines.append(f"[bold cyan]#{i+1}[/bold cyan] {contact.full_name or '(no name)'}")
+            lines.append(f"     Phone: {phones}  |  Email: {emails}")
+            if contact.org:
+                lines.append(f"     Org: {contact.org}")
+            lines.append(f"     From: {contact.source_file}")
+        signals = ", ".join(f"{s.kind}" for s in c.signals)
+        lines.append(f"\n[dim]Signals: {signals}[/dim]")
+        proposed = preview_name(c)
+        lines.append(f"[bold green]→ Merged name: {proposed}[/bold green]")
+        self.query_one("#cluster-view").update("\n".join(lines))
+        self.query_one("#preview").update("")
+        self.query_one("#log").update("")
 
-        proposed = preview_name(cluster)
-        self.query_one("#proposed-name").update(
-            f"[bold green]→ If merged: [white]{proposed}[/white][/bold green]"
+    def _summary(self) -> None:
+        n = len(self.merged)
+        s = len(self.skipped_clusters)
+        self.query_one("#cluster-view").update(
+            f"[bold]Merged: {n}[/bold]  |  [dim]Skipped: {s}[/dim]"
         )
-
-    def _advance(self) -> None:
-        self.current_idx += 1
-        if self.current_idx >= len(self.clusters):
-            self.current_idx = len(self.clusters)
-            self.query_one("#cluster-info").update("[green]All clusters reviewed![/green]")
-            self.query_one("#cluster-entries").update("")
-            self.query_one("#proposed-name").update("")
-            self._show_summary()
-        else:
-            self._show_cluster()
-
-    def _show_summary(self) -> None:
-        total_out = len(self.contacts) - sum(len(c.contacts) for c in self.merged_contacts) + len(self.merged_contacts) + len(self.kept_contacts)
-        lines = [
-            f"[bold]Merged: {len(self.merged_contacts)}[/bold]",
-            f"[bold]Kept separate: {len(self.kept_contacts)}[/bold]",
-            f"[bold]Result: {total_out} contacts[/bold]",
-        ]
-        self.query_one("#merge-log").update("\n".join(lines))
-
-    def _log_merge(self, cluster: DuplicateCluster, merged: Contact, action: str) -> None:
-        self.results_log.append({
-            "action": action,
-            "entries": [(c.full_name, c.all_phone_strings) for c in cluster.contacts],
-            "result": merged.full_name,
-            "phones": merged.all_phone_strings,
-            "emails": merged.all_email_strings,
-        })
 
     def action_approve(self) -> None:
-        if not self.clusters or self.current_idx >= len(self.clusters):
+        if self.idx >= len(self.clusters):
             return
-        cluster = self.clusters[self.current_idx]
+        cluster = self.clusters[self.idx]
         merged = merge_cluster(cluster)
-        self.merged_contacts.append(merged)
-        self._log_merge(cluster, merged, "merged")
-        self.query_one("#merge-log").update(f"[green]✓ Merged as: {merged.full_name}[/green]")
-        self._advance()
+        self.merged.append(merged)
+        self.query_one("#log").update(f"[green]✓ Merged as: {merged.full_name}[/green]")
+        self.idx += 1
+        self._show()
 
     def action_skip(self) -> None:
-        if not self.clusters or self.current_idx >= len(self.clusters):
+        if self.idx >= len(self.clusters):
             return
-        self.query_one("#merge-log").update("[dim]Skipped[/dim]")
-        self._advance()
-
-    def action_keep(self) -> None:
-        if not self.clusters or self.current_idx >= len(self.clusters):
-            return
-        cluster = self.clusters[self.current_idx]
-        for c in cluster.contacts:
-            self.kept_contacts.append(c)
-        self.query_one("#merge-log").update("[yellow]Keeping separate[/yellow]")
-        self._advance()
+        self.skipped_clusters.append(self.idx)
+        self.query_one("#log").update("[dim]Skipped[/dim]")
+        self.idx += 1
+        self._show()
 
     def action_rename(self) -> None:
-        if not self.clusters or self.current_idx >= len(self.clusters):
+        if self.idx >= len(self.clusters):
             return
-        cluster = self.clusters[self.current_idx]
-        self.app.push_screen(RenameScreen(cluster, self))
+        self.app.push_screen(RenameScreen(self.clusters[self.idx], self))
 
-    def action_next_cluster(self) -> None:
-        if self.current_idx < len(self.clusters) - 1:
-            self.current_idx += 1
-            self.query_one("#merge-log").update("")
-            self._show_cluster()
+    def action_next(self) -> None:
+        if self.idx < len(self.clusters) - 1:
+            self.idx += 1
+            self._show()
 
-    def action_prev_cluster(self) -> None:
-        if self.current_idx > 0:
-            self.current_idx -= 1
-            self.query_one("#merge-log").update("")
-            self._show_cluster()
+    def action_prev(self) -> None:
+        if self.idx > 0:
+            self.idx -= 1
+            self._show()
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -273,311 +263,296 @@ class MergeScreen(Screen):
 class RenameScreen(Screen):
     BINDINGS = [Binding("escape", "back", "Back")]
 
-    def __init__(self, cluster: DuplicateCluster, merge_screen: MergeScreen):
+    def __init__(self, cluster: DuplicateCluster, parent: MergeScreen):
         super().__init__()
         self.cluster = cluster
-        self.merge_screen = merge_screen
+        self.parent = parent
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="rename-area"):
+        with Vertical(id="rename"):
             yield Static("[bold]Current names:[/bold]")
             for c in self.cluster.contacts:
-                yield Static(f"  - {c.full_name or '(no name)'}")
+                yield Static(f"  {c.full_name or '(no name)'}")
             yield Static("")
-            yield Static("[bold]Enter the correct name:[/bold]")
-            yield Input(placeholder="Type the name...", id="name-input")
+            yield Label("[bold]Enter the correct name:[/bold]")
+            yield Input(placeholder="Type name...", id="name-input")
             with Horizontal():
                 yield Button("Confirm", variant="success", id="confirm")
-                yield Button("Cancel", variant="default", id="cancel")
+                yield Button("Cancel", id="cancel")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#name-input").focus()
 
+    def _apply(self, name: str) -> None:
+        if not name:
+            return
+        merged = merge_cluster(self.cluster, chosen_name=name)
+        self.parent.merged.append(merged)
+        self.parent.query_one("#log").update(f"[green]✓ Merged as: {merged.full_name}[/green]")
+        self.parent.idx += 1
+        self.parent._show()
+        self.app.pop_screen()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm":
-            name = self.query_one("#name-input").value.strip()
-            if name:
-                merged = merge_cluster(self.cluster, chosen_name=name)
-                self.merge_screen.merged_contacts.append(merged)
-                self.merge_screen._log_merge(self.cluster, merged, "renamed")
-                self.merge_screen.query_one("#merge-log").update(
-                    f"[green]✓ Merged as: {merged.full_name}[/green]"
-                )
-                self.merge_screen._advance()
-                self.app.pop_screen()
+            self._apply(self.query_one("#name-input").value.strip())
         elif event.button.id == "cancel":
             self.app.pop_screen()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        name = event.value.strip()
-        if name:
-            merged = merge_cluster(self.cluster, chosen_name=name)
-            self.merge_screen.merged_contacts.append(merged)
-            self.merge_screen._log_merge(self.cluster, merged, "renamed")
-            self.merge_screen.query_one("#merge-log").update(
-                f"[green]✓ Merged as: {merged.full_name}[/green]"
-            )
-            self.merge_screen._advance()
-            self.app.pop_screen()
+        self._apply(event.value.strip())
 
 
 class CleanScreen(Screen):
+    """Find-and-replace style name cleaning with full control."""
+
     BINDINGS = [
         Binding("escape", "back", "Back"),
-        Binding("q", "quit", "Quit"),
+        Binding("ctrl+a", "apply", "Apply Changes"),
     ]
 
-    def __init__(self, contacts: list[Contact], file_paths: list[str]):
+    def __init__(self, contacts: list[Contact]):
         super().__init__()
         self.contacts = contacts
-        self.file_paths = file_paths
-        self.changes_log: list[dict] = []
+        self.changes: list[tuple[Contact, str, str]] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="clean-area"):
-            yield Static("[bold cyan]Name Cleanup[/bold cyan]\n")
-            yield Checkbox("Title-case names (RAJESH → Rajesh)", id="fix-case", value=True)
-            yield Checkbox("Strip honorifics (Mr./Mrs./Dr./Smt./Shri/Ji)", id="strip-honor", value=True)
+        with Vertical(id="clean"):
+            yield Static("[bold]Clean & Rename Contacts[/bold]\n")
+
+            yield Label("[bold]Find text in names:[/bold]")
+            yield Input(placeholder="e.g. Mr.  or  RAJESH  or  (Home)", id="find-input")
+
+            yield Label("[bold]Replace with (leave empty to remove):[/bold]")
+            yield Input(placeholder="replacement text...", id="replace-input", value="")
+
             yield Static("")
-            yield Button("Preview Changes", variant="primary", id="preview-btn")
-            yield Button("Apply Changes", variant="success", id="apply-btn")
-            yield Button("Back to Menu (esc)", variant="default", id="back-btn")
-            yield Static("", id="clean-result")
-            yield RichLog(id="clean-log", highlight=True)
+            with Horizontal():
+                yield Checkbox("Case-sensitive", id="case-sensitive", value=False)
+                yield Checkbox("Regex mode", id="regex-mode", value=False)
+                yield Checkbox("Title-case result", id="title-case", value=False)
+
+            yield Static("")
+            with Horizontal():
+                yield Button("Preview (p)", variant="primary", id="preview-btn")
+                yield Button("Apply to All (Ctrl+A)", variant="success", id="apply-btn")
+                yield Button("Quick: Strip Honorifics", variant="warning", id="strip-btn")
+                yield Button("Quick: Title-Case All", variant="warning", id="titlecase-btn")
+                yield Button("Quick: Remove Brackets", variant="warning", id="brackets-btn")
+                yield Button("Back (esc)", id="back")
+
+            yield Static("", id="count-label")
+            yield RichLog(id="preview-log", highlight=True)
         yield Footer()
+
+    def _find_matches(self) -> list[Contact]:
+        find_text = self.query_one("#find-input").value
+        if not find_text:
+            return []
+        case_sensitive = self.query_one("#case-sensitive").value
+        use_regex = self.query_one("#regex-mode").value
+
+        matches = []
+        for c in self.contacts:
+            name = c.full_name
+            if not name:
+                continue
+            if use_regex:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                if re.search(find_text, name, flags):
+                    matches.append(c)
+            else:
+                hay = name if case_sensitive else name.lower()
+                needle = find_text if case_sensitive else find_text.lower()
+                if needle in hay:
+                    matches.append(c)
+        return matches
+
+    def _compute_replacements(self) -> list[tuple[Contact, str, str]]:
+        find_text = self.query_one("#find-input").value
+        replace_text = self.query_one("#replace-input").value
+        case_sensitive = self.query_one("#case-sensitive").value
+        use_regex = self.query_one("#regex-mode").value
+        do_title = self.query_one("#title-case").value
+
+        if not find_text:
+            return []
+
+        changes = []
+        for c in self.contacts:
+            name = c.full_name
+            if not name:
+                continue
+            if use_regex:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                new_name = re.sub(find_text, replace_text, name, flags=flags)
+            else:
+                if case_sensitive:
+                    new_name = name.replace(find_text, replace_text)
+                else:
+                    pattern = re.compile(re.escape(find_text), re.IGNORECASE)
+                    new_name = pattern.sub(replace_text, name)
+            new_name = re.sub(r"\s+", " ", new_name).strip()
+            if do_title:
+                new_name = title_case_name(new_name)
+            if new_name != name:
+                changes.append((c, name, new_name))
+        return changes
+
+    def _show_preview(self, changes: list[tuple[Contact, str, str]]) -> None:
+        log = self.query_one("#preview-log")
+        log.clear()
+        self.query_one("#count-label").update(f"[bold]{len(changes)} contacts would be changed[/bold]")
+        if not changes:
+            log.write("[dim]No matches found.[/dim]")
+            return
+        for c, old, new in changes:
+            phones = ", ".join(p.number for p in c.phones) or ""
+            log.write(f"  [red]{old}[/red]  →  [green]{new}[/green]  [dim]{phones}[/dim]")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "preview-btn":
-            self._preview()
+            self._show_preview(self._compute_replacements())
         elif event.button.id == "apply-btn":
-            self._apply()
-        elif event.button.id == "back-btn":
+            self._apply_all()
+        elif event.button.id == "strip-btn":
+            self._quick_strip()
+        elif event.button.id == "titlecase-btn":
+            self._quick_titlecase()
+        elif event.button.id == "brackets-btn":
+            self._quick_brackets()
+        elif event.button.id == "back":
             self.app.pop_screen()
 
-    def _get_flags(self) -> tuple[bool, bool]:
-        fix_case = self.query_one("#fix-case").value
-        strip_honor = self.query_one("#strip-honor").value
-        return fix_case, strip_honor
-
-    def _compute_changes(self) -> list[dict]:
-        fix_case, strip_honor = self._get_flags()
-        changes = []
-        for c in self.contacts:
-            old_name = c.full_name
-            if fix_case and strip_honor:
-                new_name = normalize_name_case(old_name)
-            elif fix_case:
-                new_name = title_case_name(old_name)
-            elif strip_honor:
-                new_name = clean_name(old_name)
-            else:
-                new_name = old_name
-            if new_name != old_name:
-                changes.append({
-                    "before": old_name,
-                    "after": new_name,
-                    "phones": c.all_phone_strings,
-                })
-        return changes
-
-    def _preview(self) -> None:
-        changes = self._compute_changes()
-        log = self.query_one("#clean-log")
-        log.clear()
-        if not changes:
-            log.write("[dim]No changes needed — names are already clean.[/dim]")
-            return
-        log.write(f"[bold]{len(changes)} names would be changed:[/bold]\n")
-        for ch in changes:
-            phones = ", ".join(ch["phones"]) if ch["phones"] else ""
-            log.write(f"  [red]{ch['before']}[/red] → [green]{ch['after']}[/green]  [dim]{phones}[/dim]")
-
-    def _apply(self) -> None:
-        fix_case, strip_honor = self._get_flags()
-        log = self.query_one("#clean-log")
-        changes = self._compute_changes()
+    def _apply_all(self) -> None:
+        changes = self._compute_replacements()
+        log = self.query_one("#preview-log")
         if not changes:
             log.write("[dim]Nothing to change.[/dim]")
             return
         count = 0
+        for c, old, new in changes:
+            c.full_name = new
+            count += 1
+        log.write(f"\n[green]✓ Applied {count} changes[/green]")
+        self.query_one("#count-label").update(f"[green]{count} names updated[/green]")
+        self.query_one("#find-input").value = ""
+        self.query_one("#replace-input").value = ""
+
+    def _quick_strip(self) -> None:
+        all_honorifics = sorted(_PREFIXES | _SUFFIXES, key=len, reverse=True)
+        log = self.query_one("#preview-log")
+        log.clear()
+        count = 0
         for c in self.contacts:
-            old_name = c.full_name
-            if fix_case and strip_honor:
-                c.full_name = normalize_name_case(old_name)
-            elif fix_case:
-                c.full_name = title_case_name(old_name)
-            elif strip_honor:
-                c.full_name = clean_name(old_name)
-            if c.full_name != old_name:
-                self.changes_log.append({"before": old_name, "after": c.full_name, "phones": c.all_phone_strings})
+            old = c.full_name
+            if not old:
+                continue
+            new = clean_name(old)
+            if new != old:
+                c.full_name = new
+                phones = ", ".join(p.number for p in c.phones) or ""
+                log.write(f"  [red]{old}[/red]  →  [green]{new}[/green]  [dim]{phones}[/dim]")
                 count += 1
-        self.query_one("#clean-result").update(f"[green]Applied {count} name fixes[/green]")
-        log.write(f"\n[green]✓ Applied {count} name fixes[/green]")
+        log.write(f"\n[green]✓ Stripped honorifics from {count} contacts[/green]")
+        self.query_one("#count-label").update(f"[green]{count} names cleaned[/green]")
+
+    def _quick_titlecase(self) -> None:
+        log = self.query_one("#preview-log")
+        log.clear()
+        count = 0
+        for c in self.contacts:
+            old = c.full_name
+            if not old:
+                continue
+            new = title_case_name(old)
+            if new != old:
+                c.full_name = new
+                phones = ", ".join(p.number for p in c.phones) or ""
+                log.write(f"  [red]{old}[/red]  →  [green]{new}[/green]  [dim]{phones}[/dim]")
+                count += 1
+        log.write(f"\n[green]✓ Title-cased {count} contacts[/green]")
+        self.query_one("#count-label").update(f"[green]{count} names updated[/green]")
+
+    def _quick_brackets(self) -> None:
+        log = self.query_one("#preview-log")
+        log.clear()
+        count = 0
+        for c in self.contacts:
+            old = c.full_name
+            if not old:
+                continue
+            new = re.sub(r"\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*", " ", old)
+            new = re.sub(r"\s+", " ", new).strip()
+            new = title_case_name(new)
+            if new != old:
+                c.full_name = new
+                phones = ", ".join(p.number for p in c.phones) or ""
+                log.write(f"  [red]{old}[/red]  →  [green]{new}[/green]  [dim]{phones}[/dim]")
+                count += 1
+        log.write(f"\n[green]✓ Removed brackets from {count} contacts[/green]")
+        self.query_one("#count-label").update(f"[green]{count} names updated[/green]")
+
+    def action_apply(self) -> None:
+        self._apply_all()
 
     def action_back(self) -> None:
         self.app.pop_screen()
 
 
-class ViewScreen(Screen):
-    BINDINGS = [
-        Binding("escape", "back", "Back"),
-        Binding("q", "quit", "Quit"),
-    ]
-
-    def __init__(self, contacts: list[Contact], file_paths: list[str]):
-        super().__init__()
-        self.contacts = contacts
-        self.file_paths = file_paths
-
-    def compose(self) -> ComposeResult:
-        yield Header()
-        with Vertical(id="view-area"):
-            yield Static(f"[bold]All Contacts ({len(self.contacts)})[/bold]\n")
-            table = DataTable(id="contacts-table")
-            yield table
-            yield Button("Back to Menu (esc)", variant="default", id="back-btn")
-        yield Footer()
-
-    def on_mount(self) -> None:
-        table = self.query_one("#contacts-table")
-        table.add_columns("Name", "Phones", "Emails", "Org", "Source")
-        for c in self.contacts:
-            phones = ", ".join(p.number for p in c.phones) or "-"
-            emails = ", ".join(e.address for e in c.emails) or "-"
-            table.add_row(c.full_name or "(no name)", phones, emails, c.org or "-", c.source_file)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "back-btn":
-            self.app.pop_screen()
-
-
 class ExportScreen(Screen):
-    BINDINGS = [
-        Binding("escape", "back", "Back"),
-        Binding("q", "quit", "Quit"),
-    ]
+    BINDINGS = [Binding("escape", "back", "Back")]
 
-    def __init__(self, contacts: list[Contact], file_paths: list[str]):
+    def __init__(self, contacts: list[Contact]):
         super().__init__()
         self.contacts = contacts
-        self.file_paths = file_paths
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="export-area"):
-            yield Static("[bold cyan]Export Contacts[/bold cyan]\n")
-            yield Static(f"Ready to export [bold]{len(self.contacts)}[/bold] contacts\n")
+        with Vertical(id="export"):
+            yield Static(f"[bold]Export {len(self.contacts)} contacts to VCF[/bold]\n")
             yield Label("Output filename:")
-            yield Input(value="merged_contacts.vcf", id="filename-input")
-            yield Static("")
+            yield Input(value="merged_contacts.vcf", id="filename")
             with Horizontal():
                 yield Button("Export", variant="success", id="export-btn")
-                yield Button("Back to Menu (esc)", variant="default", id="back-btn")
-            yield Static("", id="export-result")
+                yield Button("Back (esc)", id="back")
+            yield Static("", id="result")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "export-btn":
-            filename = self.query_one("#filename-input").value.strip() or "merged_contacts.vcf"
-            output_path = Path(filename)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            count = export_vcf(self.contacts, output_path)
-            self.query_one("#export-result").update(
-                f"[green]✓ Exported {count} contacts to {output_path}[/green]"
-            )
-        elif event.button.id == "back-btn":
+            name = self.query_one("#filename").value.strip() or "merged_contacts.vcf"
+            path = Path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            count = export_vcf(self.contacts, path)
+            self.query_one("#result").update(f"[green]✓ Exported {count} contacts to {path}[/green]")
+        elif event.button.id == "back":
             self.app.pop_screen()
-
-
-class FilePickerScreen(Screen):
-    BINDINGS = [Binding("escape", "back", "Back")]
-
-    def __init__(self, contacts: list[Contact], file_paths: list[str]):
-        super().__init__()
-        self.contacts = contacts
-        self.file_paths = file_paths
-
-    def compose(self) -> ComposeResult:
-        yield Header()
-        with Vertical(id="picker-area"):
-            yield Static("[bold cyan]Load More VCF Files[/bold cyan]\n")
-            yield Static("Current files:")
-            for fp in self.file_paths:
-                yield Static(f"  ✓ {fp}")
-            yield Static("")
-            yield Static("Enter a VCF file path to add:")
-            yield Input(placeholder="/path/to/file.vcf", id="file-input")
-            with Horizontal():
-                yield Button("Add & Load", variant="success", id="add-btn")
-                yield Button("Back to Menu (esc)", variant="default", id="back-btn")
-            yield Static("", id="picker-result")
-        yield Footer()
-
-    def on_mount(self) -> None:
-        self.query_one("#file-input").focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "add-btn":
-            self._add_file()
-        elif event.button.id == "back-btn":
-            self.app.pop_screen()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._add_file()
-
-    def _add_file(self) -> None:
-        path_str = self.query_one("#file-input").value.strip()
-        if not path_str:
-            return
-        path = Path(path_str)
-        if not path.exists():
-            self.query_one("#picker-result").update(f"[red]File not found: {path}[/red]")
-            return
-        if path_str in self.file_paths:
-            self.query_one("#picker-result").update("[yellow]File already loaded[/yellow]")
-            return
-        new_contacts = load_all([path])
-        self.contacts.extend(new_contacts)
-        self.file_paths.append(path_str)
-        self.query_one("#picker-result").update(
-            f"[green]✓ Loaded {len(new_contacts)} contacts from {path.name}[/green]"
-        )
-        self.query_one("#file-input").value = ""
 
 
 class ContactSorterApp(App):
     TITLE = "Contact Sorter"
-    SUB_TITLE = "Merge & deduplicate VCF contacts"
+    SUB_TITLE = "merge · clean · organize"
 
     CSS = """
-    #load-area, #menu-area, #merge-area, #clean-area, #view-area, #export-area, #picker-area, #rename-area {
-        padding: 1 2;
-    }
-    #title {
-        text-align: center;
-        padding: 1 0;
-    }
-    #cluster-entries {
-        height: auto;
-        max-height: 15;
-    }
-    #merge-actions {
-        padding: 1 0;
-    }
-    #merge-actions Button {
-        margin: 0 1;
-    }
-    #clean-log {
-        height: 12;
-        border: solid $accent;
-        margin: 1 0;
-    }
-    #contacts-table {
-        height: 1fr;
-    }
+    Screen { background: $surface; }
+    #main { padding: 1 2; }
+    #menu { width: 100%; }
+    .search-bar { width: 100%; margin: 0 0 1 0; }
+    #table { height: 1fr; }
+    #view { padding: 0 1; }
+    #merge { padding: 0 2; }
+    #clean { padding: 0 2; }
+    #rename { padding: 1 2; }
+    #export { padding: 1 2; }
+    #cluster-view { height: auto; max-height: 18; }
+    #preview-log { height: 12; border: solid $accent; margin: 1 0; }
+    #btns Button { margin: 0 1; }
+    #actions { padding: 1 0; }
+    #count-label { padding: 0 0 0 0; }
     """
 
     BINDINGS = [Binding("q", "quit", "Quit")]
@@ -587,7 +562,57 @@ class ContactSorterApp(App):
         self.file_paths = file_paths
 
     def on_mount(self) -> None:
-        self.push_screen(LoadScreen(self.file_paths))
+        if self.file_paths:
+            contacts = load_all(self.file_paths)
+            self.push_screen(MainMenu(contacts))
+        else:
+            self.push_screen(FileLoadScreen())
+
+    def action_quit(self) -> None:
+        self.exit()
+
+
+class FileLoadScreen(Screen):
+    BINDINGS = [Binding("q", "quit", "Quit")]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Vertical(id="load"):
+            yield Static("[bold]Contact Sorter[/bold]\n")
+            yield Label("Enter VCF file paths (comma-separated):")
+            yield Input(placeholder="/path/to/contacts.vcf", id="file-input")
+            with Horizontal():
+                yield Button("Load", variant="success", id="load-btn")
+                yield Button("Quit", variant="error", id="quit-btn")
+            yield Static("", id="load-status")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#file-input").focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "load-btn":
+            self._load()
+        elif event.button.id == "quit-btn":
+            self.app.exit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._load()
+
+    def _load(self) -> None:
+        raw = self.query_one("#file-input").value.strip()
+        if not raw:
+            return
+        paths = [p.strip() for p in raw.split(",") if p.strip()]
+        valid = []
+        for p in paths:
+            if Path(p).exists():
+                valid.append(p)
+            else:
+                self.query_one("#load-status").update(f"[red]Not found: {p}[/red]")
+                return
+        contacts = load_all(valid)
+        self.app.push_screen(MainMenu(contacts))
 
 
 def run_tui(file_paths: list[str]):
