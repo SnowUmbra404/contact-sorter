@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from rapidfuzz.distance import JaroWinkler
 
-from .normalize import normalize_phone, phone_suffix, normalize_name, normalize_email
+from .normalize import normalize_phone, phone_suffix, normalize_name, normalize_email, is_case_variant
 from .vcards import Contact
 
 
@@ -114,6 +114,15 @@ def _match_org_name(c1: Contact, c2: Contact) -> MatchSignal | None:
     return None
 
 
+def _match_case(c1: Contact, c2: Contact) -> MatchSignal | None:
+    n1 = c1.full_name.strip()
+    n2 = c2.full_name.strip()
+    if not n1 or not n2:
+        return None
+    if is_case_variant(n1, n2):
+        return MatchSignal("name_case", f'"{n1}" vs "{n2}" (case only)', 0.98)
+    return None
+
 def find_duplicates(contacts: list[Contact]) -> list[DuplicateCluster]:
     n = len(contacts)
     uf = UnionFind(n)
@@ -122,7 +131,7 @@ def find_duplicates(contacts: list[Contact]) -> list[DuplicateCluster]:
     for i in range(n):
         for j in range(i + 1, n):
             pair_signals: list[MatchSignal] = []
-            for matcher in [_match_phones, _match_emails, _match_names, _match_org_name]:
+            for matcher in [_match_phones, _match_emails, _match_case, _match_names, _match_org_name]:
                 sig = matcher(contacts[i], contacts[j])
                 if sig:
                     pair_signals.append(sig)

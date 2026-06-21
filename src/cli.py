@@ -16,6 +16,7 @@ from .vcards import load_all, Contact
 from .matcher import find_duplicates, DuplicateCluster
 from .merger import merge_cluster, preview_name
 from .exporter import export_vcf
+from .normalize import title_case_name, clean_name, normalize_name_case
 
 console = Console()
 
@@ -118,7 +119,44 @@ def _get_custom_name(cluster: DuplicateCluster) -> str:
     return Prompt.ask("  Enter the correct name")
 
 
-def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dry_run: bool, verbose: bool):
+def _show_report(name_fix_log: list[dict], changes_log: list[dict]):
+    console.print()
+    console.print(Panel("[bold]Change Report[/bold]", border_style="cyan"))
+    console.print()
+
+    if name_fix_log:
+        console.print("[bold cyan]Name Fixes:[/bold cyan]")
+        table = Table(show_header=True, header_style="bold", show_lines=False)
+        table.add_column("Before", style="dim")
+        table.add_column("→", justify="center", style="dim")
+        table.add_column("After", style="green")
+        table.add_column("Phone", style="dim")
+        for entry in name_fix_log:
+            phones = ", ".join(entry["phones"]) if entry["phones"] else "-"
+            table.add_row(entry["contact"], "→", entry["new_name"], phones)
+        console.print(table)
+        console.print()
+
+    if changes_log:
+        console.print("[bold cyan]Merges:[/bold cyan]")
+        for i, entry in enumerate(changes_log, 1):
+            kind = "Renamed merge" if entry["type"] == "rename_merge" else "Merged"
+            console.print(f"  [bold]{i}. {kind}:[/bold]")
+            for name, phones in entry["entries"]:
+                phone_str = ", ".join(phones) if phones else "no phone"
+                console.print(f"     [dim]from:[/dim]  {name}  [dim]({phone_str})[/dim]")
+            result_phones = ", ".join(entry["result_phones"]) if entry["result_phones"] else "no phone"
+            result_emails = ", ".join(entry["result_emails"]) if entry["result_emails"] else "no email"
+            console.print(f"     [green]→ to:[/green]   {entry['result']}")
+            console.print(f"     [dim]phones:[/dim] {result_phones}")
+            console.print(f"     [dim]emails:[/dim] {result_emails}")
+            console.print()
+
+    if not name_fix_log and not changes_log:
+        console.print("[dim]No changes were made.[/dim]")
+
+
+def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dry_run: bool, verbose: bool, fix_case: bool = False, strip_honorifics: bool = False, clean_names: bool = False, merge_only: bool = False):
     paths = [Path(p) for p in file_paths]
     for p in paths:
         if not p.exists():
@@ -129,6 +167,22 @@ def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dr
         task = progress.add_task("Loading contacts...", total=None)
         contacts = load_all(paths)
         progress.update(task, description=f"Loaded {len(contacts)} contacts")
+    name_fix_log: list[dict] = []
+    if fix_case or clean_names or strip_honorifics:
+        for c in contacts:
+            old_name = c.full_name
+            if clean_names:
+                c.full_name = clean_name(old_name)
+            elif fix_case and strip_honorifics:
+                c.full_name = normalize_name_case(old_name)
+            elif fix_case:
+                c.full_name = title_case_name(old_name)
+            elif strip_honorifics:
+                c.full_name = clean_name(old_name)
+            if c.full_name != old_name:
+                name_fix_log.append({"type": "name_fix", "contact": old_name, "new_name": c.full_name, "phones": c.all_phone_strings})
+        if name_fix_log:
+            console.print(f"[green]Fixed {len(name_fix_log)} names[/green]")
 
     _show_stats(contacts, file_paths)
 
@@ -152,7 +206,10 @@ def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dr
     console.print(f"[bold]Found {len(clusters)} clusters ({total_people} contacts involved)[/bold]")
     console.print()
 
-    if auto:
+    if merge_only:
+        console.print(f"[dim]Merge-only mode: merging all {len(clusters)} clusters without review[/dim]")
+        console.print()
+    elif auto:
         auto_count = sum(1 for c in clusters if c.confidence >= threshold)
         console.print(f"[dim]Auto mode: {auto_count}/{len(clusters)} clusters above {threshold:.0%} threshold will be auto-merged[/dim]")
         console.print()
@@ -162,11 +219,15 @@ def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dr
     auto_merged = 0
     user_merged = 0
     kept_separate = 0
+    changes_log: list[dict] = []
 
     for i, cluster in enumerate(clusters, 1):
         _show_cluster(cluster, i, len(clusters))
 
-        if auto and cluster.confidence >= threshold:
+        if merge_only:
+            action = "merge"
+            console.print(f"  [green]✓ Merging (merge-only mode)[/green]")
+        elif auto and cluster.confidence >= threshold:
             action = "merge"
             console.print(f"  [green]✓ Auto-merging (confidence {cluster.confidence:.0%} ≥ {threshold:.0%})[/green]")
         else:
@@ -175,14 +236,28 @@ def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dr
         if action == "merge":
             merged = merge_cluster(cluster)
             merged_contacts.append(merged)
-            auto_merged += 1 if (auto and cluster.confidence >= threshold) else 0
-            user_merged += 0 if (auto and cluster.confidence >= threshold) else 1
+            auto_merged += 1 if (merge_only or (auto and cluster.confidence >= threshold)) else 0
+            user_merged += 0 if (merge_only or (auto and cluster.confidence >= threshold)) else 1
+            changes_log.append({
+                "type": "merge",
+                "entries": [(c.full_name, c.all_phone_strings) for c in cluster.contacts],
+                "result": merged.full_name,
+                "result_phones": merged.all_phone_strings,
+                "result_emails": merged.all_email_strings,
+            })
             console.print(f"  [green]Merged as: {merged.full_name}[/green]")
         elif action == "rename":
             custom_name = _get_custom_name(cluster)
             merged = merge_cluster(cluster, chosen_name=custom_name)
             merged_contacts.append(merged)
             user_merged += 1
+            changes_log.append({
+                "type": "rename_merge",
+                "entries": [(c.full_name, c.all_phone_strings) for c in cluster.contacts],
+                "result": merged.full_name,
+                "result_phones": merged.all_phone_strings,
+                "result_emails": merged.all_email_strings,
+            })
             console.print(f"  [green]Merged as: {merged.full_name}[/green]")
         elif action == "keep":
             kept_separate += len(cluster.contacts)
@@ -215,6 +290,7 @@ def run_cli(file_paths: list[str], output: str, auto: bool, threshold: float, dr
     console.print(f"  [bold]Output contacts:      {len(deduped)}[/bold]")
     console.print(f"  Saved:                {len(contacts) - len(deduped)} duplicates removed")
     console.print()
+    _show_report(name_fix_log, changes_log)
 
     if dry_run:
         console.print("[yellow]Dry run — no file written.[/yellow]")
