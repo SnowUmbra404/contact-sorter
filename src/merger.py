@@ -1,19 +1,12 @@
-"""Merge a cluster of duplicate contacts into one clean contact."""
-
 from __future__ import annotations
 
 from .vcards import Contact, PhoneEntry, EmailEntry
 from .normalize import normalize_phone, normalize_name
-from .matcher import DuplicateCluster
-
-def preview_name(cluster: DuplicateCluster) -> str:
-    return _best_name(cluster.contacts)
 
 
-def merge_cluster(cluster: DuplicateCluster, chosen_name: str | None = None) -> Contact:
-    contacts = cluster.contacts
+def merge_list(contacts: list[Contact], chosen_name: str | None = None) -> Contact:
     if not contacts:
-        raise ValueError("Cannot merge empty cluster")
+        raise ValueError("Cannot merge empty list")
 
     full_name = chosen_name or _best_name(contacts)
 
@@ -23,7 +16,6 @@ def merge_cluster(cluster: DuplicateCluster, chosen_name: str | None = None) -> 
             norm = normalize_phone(p.number)
             if norm and norm not in phones_seen:
                 phones_seen[norm] = p
-    merged_phones = list(phones_seen.values())
 
     emails_seen: dict[str, EmailEntry] = {}
     for c in contacts:
@@ -31,7 +23,6 @@ def merge_cluster(cluster: DuplicateCluster, chosen_name: str | None = None) -> 
             key = e.address.lower().strip()
             if key and key not in emails_seen:
                 emails_seen[key] = e
-    merged_emails = list(emails_seen.values())
 
     org = _best_field(contacts, "org")
     title = _best_field(contacts, "title")
@@ -45,8 +36,8 @@ def merge_cluster(cluster: DuplicateCluster, chosen_name: str | None = None) -> 
         full_name=full_name,
         given_name=full_name.split()[0] if full_name else "",
         family_name=full_name.split()[-1] if full_name and len(full_name.split()) > 1 else "",
-        phones=merged_phones,
-        emails=merged_emails,
+        phones=list(phones_seen.values()),
+        emails=list(emails_seen.values()),
         org=org,
         title=title,
         note=note,
@@ -61,7 +52,7 @@ def _best_name(contacts: list[Contact]) -> str:
         if not name:
             continue
         norm = normalize_name(name)
-        score = len(norm) + (100 if c.full_name == c.full_name.strip() else 0)
+        score = len(norm)
         scored.append((score, name))
     if scored:
         scored.sort(key=lambda x: x[0], reverse=True)
